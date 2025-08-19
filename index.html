@@ -1,80 +1,153 @@
-// Import necessary Firebase modules
-const functions = require('firebase-functions');
-const admin = require('firebase-admin');
-const sgMail = require('@sendgrid/mail');
+ <!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Note to Future Me</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, Timestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // Global variables for Firebase. These will be automatically populated in the Canvas environment.
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        let db;
+        let auth;
+        let userId;
 
-// Initialize Firebase Admin SDK
-admin.initializeApp();
-const db = admin.firestore();
-
-// IMPORTANT: Set your SendGrid API key here.
-// You need to create an account at sendgrid.com and get your API key.
-// Never expose this in a client-side code. This is a secure backend function.
-const SENDGRID_API_KEY = "YOUR_SENDGRID_API_KEY";
-sgMail.setApiKey(SENDGRID_API_KEY);
-
-/**
- * A scheduled function that runs every 5 minutes to check for notes to send.
- * This is the "backend" service that will handle email delivery.
- */
-exports.sendFutureNotes = functions.pubsub.schedule('every 5 minutes').onRun(async (context) => {
-    try {
-        // Query Firestore for all notes that need to be sent.
-        // The query filters for notes where the sendDate is less than or equal to the current time
-        // and the 'sent' status is false.
-        const notesRef = db.collection('artifacts/default-app-id/public/data/future_notes');
-        const now = admin.firestore.Timestamp.now();
-        const querySnapshot = await notesRef.where('sendDate', '<=', now).where('sent', '==', false).get();
-
-        if (querySnapshot.empty) {
-            console.log('No notes to send. Exiting.');
-            return null;
+        // Initialize Firebase services and authenticate user
+        async function initializeFirebase() {
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+                
+                userId = auth.currentUser?.uid || crypto.randomUUID();
+                document.getElementById('status-message').textContent = 'Ready to send your note!';
+            } catch (error) {
+                console.error("Error initializing Firebase:", error);
+                document.getElementById('status-message').textContent = 'Failed to load. Please try again later.';
+            }
         }
 
-        const emailPromises = [];
-        const updatePromises = [];
+        // Get elements from the DOM
+        const emailInput = document.getElementById('email-input');
+        const noteInput = document.getElementById('note-input');
+        const dateInput = document.getElementById('date-input');
+        const sendButton = document.getElementById('send-button');
+        const messageBox = document.getElementById('message-box');
 
-        // Loop through each note that needs to be sent
-        querySnapshot.forEach(doc => {
-            const noteData = doc.data();
-            const email = noteData.email;
-            const noteContent = noteData.note;
+        // Function to show a message box
+        function showMessage(text) {
+            messageBox.textContent = text;
+            messageBox.style.display = 'block';
+            setTimeout(() => {
+                messageBox.style.display = 'none';
+            }, 3000);
+        }
 
-            console.log(`Sending note to ${email}...`);
+        // Handle sending the note
+        async function sendNote() {
+            const email = emailInput.value.trim();
+            const note = noteInput.value.trim();
+            const sendDate = dateInput.value;
 
-            // Configure the email message.
-            const msg = {
-                to: email,
-                from: 'no-reply@futuremenote.com', // Your verified sender email address
-                subject: 'A Note from Your Past Self!',
-                html: `
-                    <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-                        <h2 style="color: #4a5568;">A Note from Your Past Self!</h2>
-                        <p>Hello from the past! You wrote this note on <strong>${noteData.createdAt.toDate().toLocaleDateString()}</strong> and asked to have it delivered today.</p>
-                        <hr style="border-top: 1px solid #e2e8f0;">
-                        <p style="white-space: pre-wrap; background-color: #f7fafc; padding: 15px; border-radius: 8px;">${noteContent}</p>
-                        <p style="font-size: 0.9em; color: #718096; margin-top: 20px;">This note was delivered by FutureMeNote.com</p>
-                    </div>
-                `,
-            };
+            if (!email || !note || !sendDate) {
+                showMessage("Please fill in all fields.");
+                return;
+            }
 
-            // Add the email sending promise to our list
-            emailPromises.push(sgMail.send(msg));
+            // Convert date to Firebase Timestamp
+            const futureDate = new Date(sendDate);
+            const timestamp = Timestamp.fromDate(futureDate);
 
-            // Create a promise to update the note status after sending
-            const updatePromise = doc.ref.update({ sent: true, sentAt: now });
-            updatePromises.push(updatePromise);
+            // Disable button and show loading state
+            sendButton.disabled = true;
+            sendButton.textContent = "Sending...";
+            
+            try {
+                // Add note to Firestore
+                await addDoc(collection(db, `/artifacts/${appId}/public/data/future_notes`), {
+                    userId: userId,
+                    email: email,
+                    note: note,
+                    sendDate: timestamp,
+                    createdAt: Timestamp.now(),
+                    sent: false
+                });
+
+                showMessage("Your note has been sent to the future!");
+                
+                // Clear inputs
+                emailInput.value = '';
+                noteInput.value = '';
+                dateInput.value = '';
+
+            } catch (e) {
+                console.error("Error adding document: ", e);
+                showMessage("An error occurred. Please try again.");
+            } finally {
+                sendButton.disabled = false;
+                sendButton.textContent = "Send to the Future";
+            }
+        }
+        
+        // Add event listener to the button
+        document.addEventListener('DOMContentLoaded', () => {
+            sendButton.addEventListener('click', sendNote);
+            initializeFirebase();
         });
+    </script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 flex items-center justify-center min-h-screen p-4">
+    <div class="bg-white rounded-3xl shadow-2xl p-8 max-w-2xl w-full">
+        <div class="text-center mb-8">
+            <h1 class="text-4xl font-extrabold text-slate-800 tracking-tight mb-2">Note to Future Me</h1>
+            <p class="text-gray-500 font-medium">Capture a moment in time. Send a note to your future self.</p>
+        </div>
 
-        // Wait for all emails to be sent and all documents to be updated
-        await Promise.all(emailPromises);
-        await Promise.all(updatePromises);
+        <div class="space-y-6">
+            <div>
+                <label for="email-input" class="block text-sm font-medium text-gray-700">Your Email</label>
+                <input type="email" id="email-input" placeholder="Your email for delivery" class="mt-1 block w-full px-4 py-3 bg-gray-50 border border-gray-300 rounded-xl shadow-sm focus:ring-slate-500 focus:border-slate-500 transition-all duration-300">
+            </div>
 
-        console.log(`Successfully sent and updated ${querySnapshot.size} notes.`);
-        return null;
+            <div>
+                <label for="note-input" class="block text-sm font-medium text-gray-700">Your Note</label>
+                <textarea id="note-input" rows="5" placeholder="Dear Future Me..." class="mt-1 block w-full px-4 py-3 bg-gray-50 border border-gray-300 rounded-xl shadow-sm focus:ring-slate-500 focus:border-slate-500 transition-all duration-300"></textarea>
+            </div>
 
-    } catch (error) {
-        console.error("Error in scheduled function:", error);
-        return null;
-    }
-});
+            <div>
+                <label for="date-input" class="block text-sm font-medium text-gray-700">Deliver on</label>
+                <input type="date" id="date-input" class="mt-1 block w-full px-4 py-3 bg-gray-50 border border-gray-300 rounded-xl shadow-sm focus:ring-slate-500 focus:border-slate-500 transition-all duration-300">
+            </div>
+
+            <button id="send-button" class="w-full bg-slate-800 text-white font-bold py-4 rounded-xl shadow-lg hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-500 focus:ring-offset-2 transition-all duration-300 transform hover:scale-105">
+                Send to the Future
+            </button>
+            <p id="status-message" class="text-center text-sm text-gray-500 mt-4">Initializing...</p>
+        </div>
+
+        <!-- Message Box -->
+        <div id="message-box" class="fixed bottom-6 left-1/2 transform -translate-x-1/2 bg-slate-800 text-white text-center py-3 px-6 rounded-full shadow-lg transition-opacity duration-300 hidden">
+            <!-- Message will be displayed here -->
+        </div>
+
+    </div>
+</body>
+</html>
