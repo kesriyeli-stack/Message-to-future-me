@@ -1,0 +1,80 @@
+// Import necessary Firebase modules
+const functions = require('firebase-functions');
+const admin = require('firebase-admin');
+const sgMail = require('@sendgrid/mail');
+
+// Initialize Firebase Admin SDK
+admin.initializeApp();
+const db = admin.firestore();
+
+// IMPORTANT: Set your SendGrid API key here.
+// You need to create an account at sendgrid.com and get your API key.
+// Never expose this in a client-side code. This is a secure backend function.
+const SENDGRID_API_KEY = "YOUR_SENDGRID_API_KEY";
+sgMail.setApiKey(SENDGRID_API_KEY);
+
+/**
+ * A scheduled function that runs every 5 minutes to check for notes to send.
+ * This is the "backend" service that will handle email delivery.
+ */
+exports.sendFutureNotes = functions.pubsub.schedule('every 5 minutes').onRun(async (context) => {
+    try {
+        // Query Firestore for all notes that need to be sent.
+        // The query filters for notes where the sendDate is less than or equal to the current time
+        // and the 'sent' status is false.
+        const notesRef = db.collection('artifacts/default-app-id/public/data/future_notes');
+        const now = admin.firestore.Timestamp.now();
+        const querySnapshot = await notesRef.where('sendDate', '<=', now).where('sent', '==', false).get();
+
+        if (querySnapshot.empty) {
+            console.log('No notes to send. Exiting.');
+            return null;
+        }
+
+        const emailPromises = [];
+        const updatePromises = [];
+
+        // Loop through each note that needs to be sent
+        querySnapshot.forEach(doc => {
+            const noteData = doc.data();
+            const email = noteData.email;
+            const noteContent = noteData.note;
+
+            console.log(`Sending note to ${email}...`);
+
+            // Configure the email message.
+            const msg = {
+                to: email,
+                from: 'no-reply@futuremenote.com', // Your verified sender email address
+                subject: 'A Note from Your Past Self!',
+                html: `
+                    <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                        <h2 style="color: #4a5568;">A Note from Your Past Self!</h2>
+                        <p>Hello from the past! You wrote this note on <strong>${noteData.createdAt.toDate().toLocaleDateString()}</strong> and asked to have it delivered today.</p>
+                        <hr style="border-top: 1px solid #e2e8f0;">
+                        <p style="white-space: pre-wrap; background-color: #f7fafc; padding: 15px; border-radius: 8px;">${noteContent}</p>
+                        <p style="font-size: 0.9em; color: #718096; margin-top: 20px;">This note was delivered by FutureMeNote.com</p>
+                    </div>
+                `,
+            };
+
+            // Add the email sending promise to our list
+            emailPromises.push(sgMail.send(msg));
+
+            // Create a promise to update the note status after sending
+            const updatePromise = doc.ref.update({ sent: true, sentAt: now });
+            updatePromises.push(updatePromise);
+        });
+
+        // Wait for all emails to be sent and all documents to be updated
+        await Promise.all(emailPromises);
+        await Promise.all(updatePromises);
+
+        console.log(`Successfully sent and updated ${querySnapshot.size} notes.`);
+        return null;
+
+    } catch (error) {
+        console.error("Error in scheduled function:", error);
+        return null;
+    }
+});
